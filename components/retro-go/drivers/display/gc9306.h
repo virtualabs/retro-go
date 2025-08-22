@@ -14,7 +14,9 @@
 #include "esp_log.h"
 #include "esp_dma_utils.h"
 #include "esp_check.h"
-#include "rick.h"
+
+//#include "rick.h"
+
 #define gc9306_CMD_RAMCTRL               0xb0
 #define gc9306_DATA_LITTLE_ENDIAN_BIT    (1 << 3)
 
@@ -71,7 +73,7 @@
 #define LCD_FB_NB_ROWS              (4)
 //#define LCD_FB_MAX                  (EXAMPLE_LCD_V_RES / LCD_FB_NB_ROWS)
 #define LCD_FB_SIZE_BYTES           (240*LCD_FB_NB_ROWS*2)
-#define LCD_FB_MAX 10
+#define LCD_FB_MAX 2 
 #define LCD_RB_MAX (LCD_FB_MAX+1)
 
 #ifdef __cplusplus
@@ -143,214 +145,125 @@ gc9306_init_cmd_t g_init_cmds[] = {
     {0x00, {0}, 0}
 };
 
+typedef struct {
+    /* Jitter capacity. */
+    int capacity;
+    
+    /* Current size. */
+    int size;
+
+    /* Pending flush. */
+    bool pending;
+
+    /* Buffer. */
+    uint16_t buffer[LCD_BUFFER_LENGTH*4];
+} jitter_t;
 
 typedef struct {
-    uint16_t *p_buffer;
-    bool b_used;
-} framebuffer_t;
+    /* Current window settings. */
+    int x;
+    int xend;
+    int y;
+    int yend;
+    int width;
+    int height;
 
-/* Array of framebuffers. */
-static framebuffer_t framebuffers[LCD_FB_MAX];
+    /* Jitter height. */
+    int nrows;
 
-/* FBs ringbuffer. */
-static uint8_t pending_fbs[LCD_RB_MAX];
-static int pfbs_head, pfbs_tail;
+    /* Pixel count. */
+    int pixel_total;
+    int pixel_count; 
 
-/* FB semaphores. */
-static SemaphoreHandle_t g_fb_sem = NULL;
-static SemaphoreHandle_t g_fb_mutex = NULL;
-static SemaphoreHandle_t g_rb_mutex = NULL;
+    /* Jitters. */
+    jitter_t jitter;
+} rg_window_t;
 
-static uint16_t g_framebuffer[LCD_BUFFER_LENGTH];
+static SemaphoreHandle_t g_lcd_sem = NULL;
+static rg_window_t g_window;
 
+/* Main framebuffer. */
+static uint16_t g_fb[LCD_BUFFER_LENGTH];
 
-/***
- * Framebuffer ring-buffer
- **/
-
-bool fb_ringbuf_init(){
-	/* Initialize our ringbuffer mutex. */
-	g_rb_mutex = xSemaphoreCreateMutex();
-	if (g_rb_mutex == NULL)
-	{
-		ESP_LOGE(TAG, "cannot create mutex for FB ringbuf");
-		return false;
-	}
-	else
-	{
-		/* Initialize our ringbuf structure. */
-		memset(pending_fbs, 0xff, LCD_FB_MAX);
-		pfbs_head = 0;
-		pfbs_tail = 0;
-	}
-
-	/* Success. */
-	return true;
-}
-
-bool fb_ringbuf_insert(int fb)
-{
-	/* Do we have enough space ? */
-	if (((pfbs_tail + 1) % LCD_RB_MAX) == pfbs_head)
-	{
-		ESP_LOGD(TAG, "ringbuffer is full !");
-		return false;
-	}
-	else
-	{
-		if (xSemaphoreTake(g_rb_mutex, portMAX_DELAY) == pdTRUE)
-		{
-			pending_fbs[pfbs_tail] = fb;
-			pfbs_tail = (pfbs_tail + 1)%LCD_RB_MAX;
-
-			/* Release mutex. */
-			xSemaphoreGive(g_rb_mutex);
-		}
-		else
-		{
-			ESP_LOGE(TAG, "cannot acquire FB ringbuf mutex !");
-			return false;
-		}
-	}
-
-	/* Success. */
-	return true;
-}
-
-int fb_ringbuf_pop()
-{
-	int fb = -1;
-
-	if (pfbs_head == pfbs_tail)
-	{
-		ESP_DRAM_LOGD(TAG, "ringbuffer is empty !");
-	}
-	else
-	{
-		fb = pending_fbs[pfbs_head];
-		pfbs_head = (pfbs_head + 1)%LCD_RB_MAX;
-	}
-
-	return fb;
-}
 
 /***
- * Framebuffer marshall
+ * Jitter implementation
  **/
 
-/**
- * Find a unused framebuffer, wait for one if no resource available.
- *
- * :return: Framebuffer index, -1 if an error occured.
- * :rtype: int
- **/
-
-int fb_get_free(void)
+void jitter_init(jitter_t *jitter, int capacity)
 {
-  int fb = -1;
+    /* Reset jitter state. */
+    jitter->size = 0;
+    jitter->pending = false;
 
-	/* Enter critical section. */
-  if (xSemaphoreTake(g_fb_mutex, portMAX_DELAY) == pdTRUE)
-	{
-		if (xSemaphoreTake(g_fb_sem, portMAX_DELAY) == pdTRUE)
-		{
-				/* Find the first unused framebuffer. */
-				for (int i=0; i<LCD_FB_MAX; i++)
-				{
-					if (!framebuffers[i].b_used)
-					{
-						/*
-							Mark this framebuffer used, return the corresponding
-							index.
-						*/
-						framebuffers[i].b_used = true;
-						fb = i;
-						break;
-					}
-				}
-		}
-		else
-		{
-			ESP_LOGE(TAG, "fb_get_free(): cannot retrieve a free framebuffer (xSemaphoreTake() returned FALSE)\n");
-		}
-
-		/* Exit critical section. */
-		xSemaphoreGive(g_fb_mutex);
-	}
-  else
-  {
-		ESP_LOGE(TAG, "fd_get_free(): cannot acquire framebuffer marshall mutex !\n");
-	}
-
-	return fb;
+    /* Save its capacity. */
+    jitter->capacity = capacity;
 }
 
-bool fb_recycle_from_isr(int fb_id, BaseType_t *xHigherPriorityTaskWoken)
+
+bool jitter_add(jitter_t *jitter, uint16_t *buffer, int size)
 {
-	xHigherPriorityTaskWoken = pdFALSE;
+    //RG_LOGD("   adding %d data bytes to jitter ...", size);
 
-	if ((fb_id >= 0) && (fb_id < LCD_FB_MAX))
-	{	
-			/* Mark the given framebuffer as unused. */
-			framebuffers[fb_id].b_used = false;
+    /* Do we have enough space to save our data ? */
+    if ((jitter->size + size) > (jitter->capacity*2))
+    {
+        /* Failure, overflow. SHOULD NOT HAPPEN. */
+        return false;
+    }
+    else
+    {
+        //RG_LOGD("  jitter size before adding data: %d bytes", jitter->size);
 
-			/* Give back this framebuffer. */
-			if (xSemaphoreGiveFromISR(g_fb_sem, xHigherPriorityTaskWoken) == pdTRUE)
-			{
-				return true;
-			}
+        /* Append data to jitter's buffer. */
+        for (int j=0; j<size/2; j++)
+        {
+            jitter->buffer[jitter->size/2+j] = (buffer[j]>>8) | ((buffer[j]&0x00ff)<<8);
+        }
+        //memcpy(&jitter->buffer[jitter->size], buffer, size);
 
-			/* Success. */
-			return false;
-  }
-	else
-	{
-		ESP_DRAM_LOGE(TAG, "fb_recycle_from_isr(): invalid framebuffer id (%d)", fb_id);
+        /* Increase jitter size by 'size' bytes. */
+        jitter->size += size;
 
-		/* Failure. */
-		return false;
-	}
+        //RG_LOGD("  jitter size after data added: %d bytes", jitter->size);
+
+        /* Success. */
+        return true;
+    }
 }
 
-bool fb_recycle(int fb_id)
+bool jitter_full(jitter_t *jitter)
 {
-	if ((fb_id >= 0) && (fb_id < LCD_FB_MAX))
-	{	
-			/* Mark the given framebuffer as unused. */
-			framebuffers[fb_id].b_used = false;
-
-			/* Give back this framebuffer. */
-			if (xSemaphoreGive(g_fb_sem) == pdTRUE)
-			{
-				ESP_LOGI(TAG, "fb_recycle(): framebuffer %d has been recycled !", fb_id);
-			}
-
-			/* Success. */
-			return true;
-  }
-	else
-	{
-		ESP_LOGE(TAG, "fb_recycle(): invalid framebuffer id (%d)", fb_id);
-
-		/* Failure. */
-		return false;
-	}
+    return (jitter->size >= jitter->capacity);
 }
 
-int fb_find(uint16_t *p_buffer)
+bool jitter_flush(jitter_t *jitter)
 {
-	if (p_buffer != NULL)
-	{
-      for (int i=0; i<LCD_FB_MAX; i++)
-      {
-          if (framebuffers[i].p_buffer == p_buffer)
-              return i;
-      }
-  }
+    if (jitter_full(jitter))
+    {
+        /* Flush jitter. */
+        if (jitter->capacity != jitter->size)
+        {
+            for (int i=0; i<(jitter->size - jitter->capacity)/2; i++)
+            {
+                jitter->buffer[i] = jitter->buffer[jitter->capacity/2 + i];
+            }
+        }
 
-  /* Failure. */
-  return -1;
+        /* Adjust jitter's size. */
+        jitter->size -= jitter->capacity;
+
+        /* Reset the pending state. */
+        jitter->pending = false;
+
+        /* Success. */
+        return true;
+    }
+
+    /* Not full. */
+    return false;
 }
+
 
 /***
  * GC9306 Panel driver
@@ -424,7 +337,7 @@ esp_lcd_new_panel_gc9306(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel
     gc9306->base.disp_on_off = panel_gc9306_disp_on_off;
     gc9306->base.disp_sleep = panel_gc9306_sleep;
     *ret_panel = &(gc9306->base);
-    RG_LOGI("new gc9306 panel @%p", gc9306);
+    RG_LOGD("new gc9306 panel @%p", gc9306);
 
     return ESP_OK;
 
@@ -446,7 +359,7 @@ static esp_err_t panel_gc9306_del(esp_lcd_panel_t *panel)
     if (gc9306->reset_gpio_num >= 0) {
         gpio_reset_pin(gc9306->reset_gpio_num);
     }
-    RG_LOGI("del gc9306 panel @%p", gc9306);
+    RG_LOGD("del gc9306 panel @%p", gc9306);
     free(gc9306);
     return ESP_OK;
 }
@@ -456,7 +369,7 @@ static esp_err_t panel_gc9306_reset(esp_lcd_panel_t *panel)
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9306->io;
 
-    RG_LOGI("reset gc9306 panel");
+    RG_LOGD("reset gc9306 panel");
 
     // perform hardware reset
     if (gc9306->reset_gpio_num >= 0) {
@@ -482,7 +395,7 @@ static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel)
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9306->io;
 
-    RG_LOGI("init gc9306 panel ...");
+    RG_LOGD("init gc9306 panel ...");
 
     /* GC9306 init commands */
     while (g_init_cmds[i].cmd != 0)
@@ -632,32 +545,18 @@ static esp_err_t panel_gc9306_sleep(esp_lcd_panel_t *panel, bool sleep)
 
 bool lcd_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-	int fb;
-	BaseType_t hptask_woken = pdFALSE;
-	
-	//ESP_DRAM_LOGI(TAG, "lcd_trans_done(): framebuffer sent to screen, recycle current fb");
+    int fb;
+    BaseType_t hptask_woken = pdFALSE;
+      
+    /* Release ownership of our LCD mutex. */
+    xSemaphoreGiveFromISR(g_lcd_sem, &hptask_woken);
 
-	/* Extract first framebuffer from ringbuf. */
-	fb = fb_ringbuf_pop();
-	if (fb < 0)
-	{
-		//ESP_DRAM_LOGD(TAG, "lcd_trans_done(): no data in ringbuffer !");
-	}
-	else
-	{
-		//ESP_DRAM_LOGI(TAG, "lcd_trans_done(): recycling framebuffer %d ...", fb);
-
-		/* Recycle framebuffer. */
-		fb_recycle_from_isr(fb, &hptask_woken);
-
-	}
-
-	return hptask_woken;
+    return hptask_woken;
 }
 
 void example_init_i80_bus(esp_lcd_panel_io_handle_t *io_handle, void *user_ctx)
 {
-    RG_LOGI("Initialize Intel 8080 bus");
+    RG_LOGD("Initialize Intel 8080 bus");
     esp_lcd_i80_bus_handle_t i80_bus = NULL;
     esp_lcd_i80_bus_config_t bus_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
@@ -708,184 +607,76 @@ void example_init_i80_bus(esp_lcd_panel_io_handle_t *io_handle, void *user_ctx)
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80_bus, &io_config, io_handle));
 }
 
-void panel_fill(esp_lcd_panel_io_handle_t io, unsigned int x, unsigned int y, unsigned int w, unsigned int h, uint16_t color)
+static void panel_fill(esp_lcd_panel_io_handle_t io, unsigned int x, unsigned int y, unsigned int w, unsigned int h, uint16_t color)
 {
-	int i;
-	uint32_t pixels_count;
-	int fb = -1;
-	uint16_t *p_pixels = NULL;
-	unsigned int ymax = y+h-1;
-	unsigned int xmax = x+w-1;
-	unsigned int yend = -1;
-	int nrows = (LCD_FB_SIZE_BYTES / (w*2));
+    int i;
+    uint32_t pixels_count;
+    unsigned int ymax = y+h-1;
+    unsigned int xmax = x+w-1;
+    unsigned int yend = -1;
+    int nrows = (LCD_FB_SIZE_BYTES / (w*2));
 
-	if (nrows > h)
-	{
-		nrows = h;
-	}
+    if (nrows > h)
+    {
+        nrows = h;
+    }
 
-	while (nrows > 0)
-	{
-		//ESP_LOGI(TAG, "panel_fill(): preparing to send pixels from row %d to %d", y, y+nrows);
+    while (nrows > 0)
+    {
+        //RG_LOGD("panel_fill(): preparing to send pixels from row %d to %d", y, y+nrows);
 
-		/* Compute last row index. */
-		yend = y + nrows - 1;
-		//ESP_LOGD(TAG, "yend=%d (y+nrows)", yend);
+        /* Compute last row index. */
+        yend = y + nrows - 1;
+        //RG_LOGD("yend=%d (y+nrows)", yend);
 
-		/* Allocate a framebuffer. */
-		//ESP_LOGD(TAG, "allocating a framebuffer ...");
-		fb = fb_get_free();
-		if (fb >= 0)
-		{
-			//ESP_LOGD(TAG, "framebuffer allocated (%d, %p), fill with color (%d pixels)...", fb, framebuffers[fb].p_buffer, nrows*w);
+        /* Fill framebuffer with our color. */
+        pixels_count = nrows*w;
+        for (i=0; i<pixels_count; i++)
+        {
+            g_fb[i] = color;
+        }
 
-			/* Fill framebuffer with our color. */
-			p_pixels = framebuffers[fb].p_buffer;
-			pixels_count = nrows*w;
-			for (i=0; i<pixels_count; i++)
-			{
-				p_pixels[i] = color;
-			}
+        /* Send to LCD. */
+        //RG_LOGD("Send CASEL/PASEL to LCD driver: (%d,%d) - (%d,%d)", x,y, xmax,yend);
 
-			/* Send to LCD. */
-			//ESP_LOGD(TAG, "Send CASEL/PASEL to LCD driver: (%d,%d) - (%d,%d)", x,y, xmax,yend);
-			esp_lcd_panel_io_tx_param(io, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
-			esp_lcd_panel_io_tx_param(io, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
+        /* Send to LCD. */
+        if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+        {
+            esp_lcd_panel_io_tx_param(io, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
+            esp_lcd_panel_io_tx_param(io, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
 
-			/* Send colors. */
-			//ESP_LOGD(TAG, "Sending pixels (%lu bytes) ...", pixels_count*2);
-			fb_ringbuf_insert(fb);
-			esp_lcd_panel_io_tx_color(io, 0x2C, p_pixels , pixels_count*2);
+            /* Send colors. */
+            //RG_LOGD("Sending pixels (%lu bytes) ...", pixels_count*2);
+            esp_lcd_panel_io_tx_color(io, 0x2C, g_fb , pixels_count*2);
+        }
+        else
+        {
+            RG_LOGW("Could not take mutex ownership :(");
+        }
 
-			/* Process next slice. */
-			//ESP_LOGD(TAG, "moving y from %d to %d", y, y+nrows);
-			y += nrows;
+        
+        /* Process next slice. */
+        //RG_LOGD("moving y from %d to %d", y, y+nrows);
+        y += nrows;
 
-			/* Are we done ? */
-			if (y == (ymax+1))
-			{
-				break;
-			}
-			else if ((ymax - y) < nrows)
-			{
-				nrows = ymax-y+1;
-			}
-		}
-		else
-		{
-			//ESP_LOGE(TAG, "panel_fill(): unexpected error while requesting a framebuffer.");
-			break;
-		}
-	}
+        /* Are we done ? */
+        if (y == (ymax+1))
+        {
+            break;
+        }
+        else if ((ymax - y) < nrows)
+        {
+            nrows = ymax-y+1;
+        }
+    }
 }
-
-void panel_blit(esp_lcd_panel_io_handle_t io, unsigned int x, unsigned int y, unsigned int w, unsigned int h, uint16_t* p_buffer, unsigned int bufsize)
-{
-	int i;
-	uint32_t pixels_count;
-	int fb = -1;
-	uint16_t *p_pixels = NULL;
-	unsigned int ymax = y+h-1;
-	unsigned int xmax = x+w-1;
-	unsigned int yend = -1;
-	int nrows = (LCD_FB_SIZE_BYTES / (w*2));
-
-	if (nrows > h)
-	{
-		nrows = h;
-	}
-
-	while (nrows > 0)
-	{
-		//ESP_LOGI(TAG, "panel_fill(): preparing to send pixels from row %d to %d", y, y+nrows);
-
-		/* Compute last row index. */
-		yend = y + nrows - 1;
-		//ESP_LOGD(TAG, "yend=%d (y+nrows)", yend);
-
-		/* Allocate a framebuffer. */
-		//ESP_LOGD(TAG, "allocating a framebuffer ...");
-		fb = fb_get_free();
-		if (fb >= 0)
-		{
-			//ESP_LOGD(TAG, "framebuffer allocated (%d, %p), fill with color (%d pixels)...", fb, framebuffers[fb].p_buffer, nrows*w);
-
-			/* Fill framebuffer with pixels from buffer. */
-			p_pixels = framebuffers[fb].p_buffer;
-			pixels_count = nrows*w;
-			memcpy(framebuffers[fb].p_buffer, (void *)&p_buffer[y*w], pixels_count*2); 
-
-			/* Send to LCD. */
-			//ESP_LOGD(TAG, "Send CASEL/PASEL to LCD driver: (%d,%d) - (%d,%d)", x,y, xmax,yend);
-			esp_lcd_panel_io_tx_param(io, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
-			esp_lcd_panel_io_tx_param(io, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
-
-			/* Send colors. */
-			//ESP_LOGD(TAG, "Sending pixels (%lu bytes) ...", pixels_count*2);
-			fb_ringbuf_insert(fb);
-			esp_lcd_panel_io_tx_color(io, 0x2C, p_pixels , pixels_count*2);
-
-			/* Process next slice. */
-			//ESP_LOGD(TAG, "moving y from %d to %d", y, y+nrows);
-			y += nrows;
-
-			/* Are we done ? */
-			if (y == (ymax+1))
-			{
-				break;
-			}
-			else if ((ymax - y) < nrows)
-			{
-				nrows = ymax-y+1;
-			}
-		}
-		else
-		{
-			//ESP_LOGE(TAG, "panel_fill(): unexpected error while requesting a framebuffer.");
-			break;
-		}
-	}
-}
-
 
 void example_init_lcd_panel(esp_lcd_panel_io_handle_t io_handle, esp_lcd_panel_handle_t *panel)
 {
     esp_lcd_panel_handle_t panel_handle = NULL;
 
-    /* Initialize our framebuffers. */
-		memset(framebuffers, 0, LCD_FB_MAX*sizeof(framebuffer_t));
-    for (int fb = 0; fb < LCD_FB_MAX; fb++)
-    {
-        /* Allocate a framebuffer in PSRAM and save it into our structure. */ 
-        framebuffers[fb].p_buffer = (uint16_t *)malloc(LCD_FB_SIZE_BYTES);
-        if (framebuffers[fb].p_buffer == NULL)
-        {
-            ESP_LOGE(TAG, "Memory error: cannot allocate %d bytes for framebuffer %d", LCD_FB_SIZE_BYTES, fb);
-            framebuffers[fb].b_used = true;
-        }
-        else
-        {
-            framebuffers[fb].b_used = false;
-        }
-    }
-
-		/* Create our counting semaphore used to marshall LCB framebuffers. */
-		g_fb_sem = xSemaphoreCreateCounting(LCD_FB_MAX, LCD_FB_MAX);
-	  if (g_fb_sem == NULL)
-		{
-			ESP_LOGE(TAG, "Cannot create counting semaphore (LCD framebuffers marshall) !");
-		}
-		g_fb_mutex = xSemaphoreCreateMutex();
-		if (g_fb_mutex == NULL)
-		{
-			ESP_LOGE(TAG, "Cannot create mutex (LCD framebuffers marshall) !");
-		}
-
-		/* Initialize our ringbuffer. */
-		fb_ringbuf_init();
-
     /* Install LCD driver */
-    ESP_LOGI(TAG, "Install LCD driver of GC9306");
+    RG_LOGD("Install LCD driver of GC9306");
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = EXAMPLE_PIN_NUM_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
@@ -912,57 +703,139 @@ static void lcd_set_backlight(float percent)
 
 static void lcd_set_window(int left, int top, int width, int height)
 {
-    int right = left + width - 1;
-    int bottom = top + height - 1;
+    //RG_LOGD("setting drawing window: x=%d, y=%d, w=%d, h=%d", left, top, width, height);
+    
+    /* Save window in our structure. */
+    g_window.x = left;
+    g_window.y = top;
+    g_window.width = width;
+    g_window.height = height;
+    g_window.xend = left + width - 1;
+    g_window.yend = top + height - 1;
+    g_window.pixel_total = width*height;
+    g_window.pixel_count = 0;
 
-    if (left < 0 || top < 0 || right >= display.screen.real_width || bottom >= display.screen.real_height)
-        RG_LOGW("Bad lcd window (x0=%d, y0=%d, x1=%d, y1=%d)\n", left, top, right, bottom);
-
-    /* Set CASET and RASET. */
-    esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(left>>8)&0xff, left&0xff, (right >> 8) & 0xff, right & 0xff}, 4);
-    esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(top>>8)&0xff, top&0xff, (bottom >> 8) & 0xff, bottom & 0xff}, 4);
+    /* Compute our jitter size and line numbers. */
+    g_window.nrows = (LCD_BUFFER_LENGTH / width);  
+    jitter_init(&g_window.jitter, g_window.nrows * width * 2);  
+    //RG_LOGD("Jitter intialized with capacity=%d", g_window.jitter.capacity);
 }
-
 
 static inline uint16_t *lcd_get_buffer(size_t length)
 {
-    int fb;
-
-    /* Allocate a framebuffer. */
-    fb = fb_get_free();
-    if (fb < 0)
-    {
-        RG_LOGW("gc9306: framebuffer allocation failed !");
-        return NULL;
-    }
-    
-    return framebuffers[fb].p_buffer;
+    return g_fb;
 }
-
 
 static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
 {
-    int fb;
+    int jitter_left = 0;
 
-    /* Find the corresponding framebuffer id. */
-    fb = fb_find(buffer);
-    if (fb < 0) {
-        RG_LOGE("Cannot identify the provided framebuffer: %p", buffer);
-    }
-    else
+    int x = g_window.x;
+    int xmax = g_window.xend;
+    int y = g_window.y;
+    int yend;
+
+    //RG_LOGD("sending %d pixels (%d bytes) to current window", length, length*2);
+
+    /* Should we flush our jitter ? */
+    if (g_window.jitter.pending)
     {
-        if (length > 0)
+        //RG_LOGD("Jitter needs to be flushed, current size: %d", g_window.jitter.size);
+        if (!jitter_flush(&g_window.jitter))
         {
-            /* Save framebuffer id into our FB ring buffer. */
-            fb_ringbuf_insert(fb);
+            RG_LOGE("Could not flush jitter.");
+        }
+        //RG_LOGD("Jitter size after flush: %d", g_window.jitter.size);
+    }
 
-            /* Send colors. */
-            esp_lcd_panel_io_tx_color(io_handle, 0x2C, buffer , length);
+    /* Add pixel data to our jitter. */
+    //RG_LOGD("adding %d bytes to jitter", length*2);
+    if (jitter_add(&g_window.jitter, buffer, length*2))
+    {
+        /* Is our jitter full ? (ready to be sent) */
+        if (jitter_full(&g_window.jitter))
+        {
+            //RG_LOGD("Jitter is full, sending data to screen.");
+
+            /* Send jitter to screen. */
+            if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+            {
+                yend = RG_MIN(g_window.y + g_window.nrows - 1, g_window.yend);
+
+                esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
+                esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
+
+                /* Send colors. */
+                //RG_LOGD("Sending pixels (%d bytes) ...", g_window.jitter.capacity);
+                g_window.jitter.pending = true;
+                esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_window.jitter.buffer, g_window.jitter.capacity);
+
+                /* Update the number of pixels already sent. */
+                g_window.pixel_count += length;
+                jitter_left = g_window.jitter.size - g_window.jitter.capacity;
+
+                /* Update window y. */
+                g_window.y += g_window.nrows;
+
+                //RG_LOGD("Remaining bytes in jitter: %d", jitter_left);
+            }
+            else
+            {
+                RG_LOGW("Could not take mutex ownership :(");
+            }
         }
         else
         {
-            fb_recycle(fb);
+            //RG_LOGD("jitter not full, current size: %d bytes", g_window.jitter.size);
+            jitter_left = g_window.jitter.size;
         }
+
+        /* Process data left in jitter. */
+        //RG_LOGD("Check if last jitter to be sent: pixels=%d total=%d jitter=%d", g_window.pixel_count, g_window.pixel_total, jitter_left/2);
+        if ((g_window.pixel_count + jitter_left/2) == g_window.pixel_total)
+        {
+            //RG_LOGD("Received %d pixels, %d pixels in jitter = %d pixels total (window full)",
+            //        g_window.pixel_count, jitter_left/2, g_window.pixel_total);
+
+            /* Flush jitter if needed. */
+            if (g_window.jitter.pending)
+            {
+                //RG_LOGD("Jitter needs flushing: %d / %d bytes", g_window.jitter.size, g_window.jitter.capacity); 
+                jitter_flush(&g_window.jitter);
+                //RG_LOGD("Jitter has been flushed.");
+            }
+
+            //RG_LOGD("Window is full, sending remaining data to screen.");
+
+            /* Send jitter to screen. */
+            if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+            {
+                yend = g_window.yend;
+
+                esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
+                esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
+
+                /* Send colors. */
+                //RG_LOGD("Sending pixels (%d bytes) ...", jitter_left);
+                esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_window.jitter.buffer, jitter_left);
+
+                /* Update the number of pixels already sent. */
+                g_window.pixel_count += g_window.jitter.size/2;
+            }
+            else
+            {
+                RG_LOGW("Could not take mutex ownership :(");
+            } 
+        }
+        else
+        {
+            //RG_LOGD("Received %d pixels so far, waiting more to reach %d pixels.", g_window.pixel_count, g_window.pixel_total);
+        }
+
+    } 
+    else
+    {
+        RG_LOGE("Jitter has overflowed !");
     }
 }
 
@@ -977,22 +850,35 @@ static void lcd_sync(void)
 
 static void lcd_init()
 {
-    RG_LOGI("initializing I8080 bus ...");
+    int fb;
+
+    memset(g_fb, 0, LCD_FB_SIZE_BYTES);
+
+    g_lcd_sem = xSemaphoreCreateBinary();
+    if (g_lcd_sem == NULL)
+    {
+        RG_LOGE("Cannot create LCD binary semaphore !");
+    }
+    xSemaphoreGive(g_lcd_sem);
+
+    RG_LOGD("initializing I8080 bus ...");
     example_init_i80_bus(&io_handle, NULL);
 
-    RG_LOGI("initializing LCD GC9306 panel ...");
+    RG_LOGD("initializing LCD GC9306 panel ...");
     esp_lcd_panel_handle_t panel_handle = NULL;
     example_init_lcd_panel(io_handle, &panel_handle);
 
-    RG_LOGI("enabling lcd ...");
+    RG_LOGD("enabling lcd ...");
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+    rg_usleep(100*1000);
 
     /* Clean panel. */
-    RG_LOGI("filling with rick ...");
+    //RG_LOGD("filling with rick ...");
     //panel_fill(io_handle, 0, 0, 240, 320, 0x0000);
     //panel_blit(io_handle, 0, 0, 240, 314, rick, 75360);
     rg_display_clear(C_BLACK);
-    rg_usleep(100 * 1000);
+    //rg_usleep(3000 * 1000);
+    RG_LOGD("init done");
 }
 
 static void lcd_deinit(void)
