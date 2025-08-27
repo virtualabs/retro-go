@@ -164,7 +164,7 @@ void rg_storage_init(void)
         RG_LOGI("Looking for an internal flash partition labelled '%s' to mount for storage...", RG_STORAGE_FLASH_PARTITION);
 
         esp_vfs_fat_mount_config_t mount_config = {
-            .format_if_mount_failed = true, // if mount failed, it's probably because it's a clean install so the partition hasn't been formatted yet
+            .format_if_mount_failed = false, // if mount failed, it's probably because it's a clean install so the partition hasn't been formatted yet
             .max_files = 4, // must be initialized, otherwise it will be 0, which doesn't make sense, and will trigger an ESP_ERR_NO_MEM error
         };
 
@@ -318,6 +318,8 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
     struct stat statbuf;
     struct dirent *ent;
 
+    RG_LOGI("enter rg_storage_scandir for directory %s", path);
+
     if (path_len > RG_PATH_MAX - 5)
     {
         RG_LOGE("Folder path too long '%s'", path);
@@ -325,13 +327,16 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
     }
 
     DIR *dir = opendir(path);
-    if (!dir)
+    if (!dir) {
+        RG_LOGE("Cannot open directory %s !", path);
         return false;
+    }
 
     // We allocate on heap in case we go recursive through rg_storage_delete
     rg_scandir_t *result = calloc(1, sizeof(rg_scandir_t));
     if (!result)
     {
+        RG_LOGE("Cannot allocate memory for directory scanning !");
         closedir(dir);
         return false;
     }
@@ -339,9 +344,12 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
     strcat(strcpy(result->path, path), "/");
     result->basename = result->path + path_len;
     result->dirname = path;
+    RG_LOGI("Loop on directory entries for path %s (%s)...", path, result->path);
 
     while ((ent = readdir(dir)))
     {
+        RG_LOGI("Entry name: %s", ent->d_name);
+
         if (ent->d_name[0] == '.' && (!ent->d_name[1] || ent->d_name[1] == '.'))
         {
             // Skip self and parent
@@ -372,7 +380,7 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
             result->size = statbuf.st_size;
             result->mtime = statbuf.st_mtime;
         }
-
+        RG_LOGI("Entry is_dir: %d, is_file: %d, types: %ld", result->is_dir, result->is_file, types);
         if ((result->is_dir && types != RG_SCANDIR_FILES) || (result->is_file && types != RG_SCANDIR_DIRS))
         {
             int ret = (callback)(result, arg);
@@ -386,10 +394,12 @@ bool rg_storage_scandir(const char *path, rg_scandir_cb_t *callback, void *arg, 
 
         if ((flags & RG_SCANDIR_RECURSIVE) && result->is_dir)
         {
+            RG_LOGI("recursion: scan subdir %s", result->path);
             rg_storage_scandir(result->path, callback, arg, flags);
         }
     }
 
+    RG_LOGI("closing directory.");
     closedir(dir);
     free(result);
 

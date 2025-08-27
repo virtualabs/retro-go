@@ -57,8 +57,8 @@
 #define EXAMPLE_PIN_NUM_BK_LIGHT       0
 
 // The pixel number in horizontal and vertical
-#define EXAMPLE_LCD_H_RES              240
-#define EXAMPLE_LCD_V_RES              320
+#define EXAMPLE_LCD_H_RES              RG_SCREEN_WIDTH
+#define EXAMPLE_LCD_V_RES              RG_SCREEN_HEIGHT
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS           8
 #define EXAMPLE_LCD_PARAM_BITS         8
@@ -71,9 +71,7 @@
 
 /* 320 rows / 4 rows = 80 "slices" */
 #define LCD_FB_NB_ROWS              (4)
-//#define LCD_FB_MAX                  (EXAMPLE_LCD_V_RES / LCD_FB_NB_ROWS)
-#define LCD_FB_SIZE_BYTES           (240*LCD_FB_NB_ROWS*2)
-#define LCD_FB_MAX 2 
+#define LCD_FB_SIZE_BYTES           (RG_SCREEN_WIDTH*LCD_FB_NB_ROWS*2)
 #define LCD_RB_MAX (LCD_FB_MAX+1)
 
 #ifdef __cplusplus
@@ -126,7 +124,7 @@ typedef struct {
 gc9306_init_cmd_t g_init_cmds[] = {
     {0xFE, {0}, 0},     /* Enable inner register 1. */
     {0xEF, {0}, 0},     /* Enable inner register 2. */
-    {0x36, {0x48}, 1},  /* Set screen orientation (MV=1, MY=0, MX=0, ML=0, BGR=1) */
+    {0x36, {0xe8}, 1},  /* Set screen orientation (MV=1, MY=1, MX=1, ML=0, BGR=1) */
     {0x3A, {0x05}, 1},  /* 16-bits per pixels on MCU interface. */
     {0xA4, {0x44}, 1},  /* Set VCore voltage to 1.7v */
     {0xA6, {0x2A}, 1},  /* Set VREG1A OUT voltage */
@@ -395,7 +393,7 @@ static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel)
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9306->io;
 
-    RG_LOGD("init gc9306 panel ...");
+    //RG_LOGI("init gc9306 panel ...");
 
     /* GC9306 init commands */
     while (g_init_cmds[i].cmd != 0)
@@ -718,7 +716,7 @@ static void lcd_set_window(int left, int top, int width, int height)
     /* Compute our jitter size and line numbers. */
     g_window.nrows = (LCD_BUFFER_LENGTH / width);  
     jitter_init(&g_window.jitter, g_window.nrows * width * 2);  
-    //RG_LOGD("Jitter intialized with capacity=%d", g_window.jitter.capacity);
+    //RG_LOGD("Jitter initialized with capacity=%d", g_window.jitter.capacity);
 }
 
 static inline uint16_t *lcd_get_buffer(size_t length)
@@ -837,6 +835,7 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
     {
         RG_LOGE("Jitter has overflowed !");
     }
+
 }
 
 static void lcd_sync(void)
@@ -861,24 +860,22 @@ static void lcd_init()
     }
     xSemaphoreGive(g_lcd_sem);
 
-    RG_LOGD("initializing I8080 bus ...");
+    RG_LOGI("initializing I8080 bus ...");
     example_init_i80_bus(&io_handle, NULL);
 
-    RG_LOGD("initializing LCD GC9306 panel ...");
+    RG_LOGI("initializing LCD GC9306 panel ...");
     esp_lcd_panel_handle_t panel_handle = NULL;
     example_init_lcd_panel(io_handle, &panel_handle);
 
-    RG_LOGD("enabling lcd ...");
+    RG_LOGI("enabling lcd ...");
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
     rg_usleep(100*1000);
 
     /* Clean panel. */
-    //RG_LOGD("filling with rick ...");
-    //panel_fill(io_handle, 0, 0, 240, 320, 0x0000);
-    //panel_blit(io_handle, 0, 0, 240, 314, rick, 75360);
+    RG_LOGI("Cleaning panel ...");
     rg_display_clear(C_BLACK);
     //rg_usleep(3000 * 1000);
-    RG_LOGD("init done");
+    RG_LOGI("init done");
 }
 
 static void lcd_deinit(void)
