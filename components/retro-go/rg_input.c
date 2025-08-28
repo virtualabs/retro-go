@@ -128,7 +128,7 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
 
 #if defined(RG_GAMEPAD_I2C_MAP)
     uint32_t buttons = 0;
-#elif defined(RG_TARGET_QTPY_GAMER) || defined(RG_TARGET_BYTEBOI_REV1) || defined(TSINGTAO)
+#if defined(RG_TARGET_QTPY_GAMER) || defined(RG_TARGET_BYTEBOI_REV1) || defined(TSINGTAO)
     buttons = ~(rg_i2c_gpio_read_port(0) | rg_i2c_gpio_read_port(1) << 8);
 #else
     uint8_t data[5];
