@@ -127,7 +127,21 @@ bool rg_i2c_write_byte(uint8_t addr, uint8_t reg, uint8_t value)
     return rg_i2c_write(addr, reg, &value, 1);
 }
 
-#if RG_I2C_DRIVER == 1
+#if RG_I2C_DRIVER == 2
+
+#define MCP23017_REG_DIRA    0x00 ///< Register for configuring direction
+#define MCP23017_REG_POLA    0x02 ///< Register for polarity inversion of inputs
+#define MCP23017_REG_PUA     0x0C ///< Register for pull-up config
+#define MCP23017_REG_INTENA  0x04 ///< Register for enabling hardware interrupt
+#define MCP23017_REG_GPIOA   0x12 ///< Register for reading input values
+
+#define MCP23017_REG_DIRB    0x01 ///< Register for configuring direction
+#define MCP23017_REG_POLB    0x03 ///< Register for polarity inversion of inputs
+#define MCP23017_REG_PUB     0x0D ///< Register for pull-up config
+#define MCP23017_REG_INTENB  0x05 ///< Register for enabling hardware interrupt
+#define MCP23017_REG_GPIOB   0x13 ///< Register for reading input values
+
+#elif RG_I2C_DRIVER == 1
 
 #define AW9523_REG_INPUT0    0x00 ///< Register for reading input values
 #define AW9523_REG_OUTPUT0   0x02 ///< Register for writing output values
@@ -157,7 +171,21 @@ bool rg_i2c_gpio_init(void)
         return false;
 
     gpio_extender_initialized = true;
-#if RG_I2C_DRIVER == 1
+#if RG_I2C_DRIVER == 2
+    gpio_extender_address = 0x20;
+
+    /* Configure PORTA as input with pull-ups and inverted polarity. */
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_DIRA, 0x7F); 
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_PUA, 0x7F);
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_POLA, 0x00);
+
+    /* Configure PORTB as input with pull-ups and inverted polarity. */
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_DIRB, 0x7F); 
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_PUB, 0x7F);
+    rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_POLB, 0x00);
+
+    
+#elif RG_I2C_DRIVER == 1
     gpio_extender_address = 0x74;
 
     rg_i2c_write_byte(gpio_extender_address, AW9523_REG_OUTPUT0, 0xFF);
@@ -197,19 +225,33 @@ bool rg_i2c_gpio_deinit(void)
 
 bool rg_i2c_gpio_set_direction(int pin, int mode)
 {
+#if RG_I2C_DRIVER == 2
+    uint8_t reg = MCP23017_REG_DIRA + (pin >> 3), mask = 1 << (pin & 7);
+    uint8_t val = rg_i2c_read_byte(gpio_extender_address, reg);
+    return rg_i2c_write_byte(gpio_extender_address, reg, mode ? (val | mask) : (val & ~mask));
+#else
     uint8_t reg = AW9523_REG_CONFIG0 + (pin >> 3), mask = 1 << (pin & 7);
     uint8_t val = rg_i2c_read_byte(gpio_extender_address, reg);
     return rg_i2c_write_byte(gpio_extender_address, reg, mode ? (val | mask) : (val & ~mask));
+#endif
 }
 
 uint8_t rg_i2c_gpio_read_port(int port)
 {
+#if RG_I2C_DRIVER == 2
+    return rg_i2c_read_byte(gpio_extender_address, MCP23017_REG_GPIOA + port);
+#else
     return rg_i2c_read_byte(gpio_extender_address, AW9523_REG_INPUT0 + port);
+#endif
 }
 
 bool rg_i2c_gpio_write_port(int port, uint8_t value)
 {
+#if RG_I2C_DRIVER == 2
+    return rg_i2c_write_byte(gpio_extender_address, MCP23017_REG_GPIOA + port, value);
+#else
     return rg_i2c_write_byte(gpio_extender_address, AW9523_REG_OUTPUT0 + port, value);
+#endif
 }
 
 int rg_i2c_gpio_get_level(int pin)
@@ -219,7 +261,11 @@ int rg_i2c_gpio_get_level(int pin)
 
 bool rg_i2c_gpio_set_level(int pin, int level)
 {
+#if RG_I2C_DRIVER == 2
+    uint8_t reg = MCP23017_REG_GPIOA + (pin >> 3), mask = 1 << (pin & 7);
+#else
     uint8_t reg = AW9523_REG_OUTPUT0 + (pin >> 3), mask = 1 << (pin & 7);
+#endif
     uint8_t val = rg_i2c_read_byte(gpio_extender_address, reg);
     return rg_i2c_write_byte(gpio_extender_address, reg, level ? (val | mask) : (val & ~mask));
 }

@@ -33,13 +33,9 @@
     {RG_KEY_DOWN,  ADC_UNIT_1, ADC_CHANNEL_5, ADC_ATTEN_DB_11, 1024, 3071},\
     {RG_KEY_LEFT,  ADC_UNIT_1, ADC_CHANNEL_6, ADC_ATTEN_DB_11, 3072, 4096},\
 }
-#endif
 #define RG_GAMEPAD_GPIO_MAP {\
     {RG_KEY_A, GPIO_NUM_41, GPIO_PULLUP_ONLY, 0},\
     {RG_KEY_START,  GPIO_NUM_42, GPIO_PULLUP_ONLY, 0},\
-}
-
-#if 0
     {RG_KEY_MENU,   GPIO_NUM_18, GPIO_PULLUP_ONLY, 0},\
     {RG_KEY_OPTION, GPIO_NUM_8,  GPIO_PULLUP_ONLY, 0},\
     {RG_KEY_A,      GPIO_NUM_15, GPIO_PULLUP_ONLY, 0},\
@@ -47,6 +43,20 @@
 }
 #endif
 
+#define RG_I2C_DRIVER       2
+#define RG_GPIO_I2C_SCL     GPIO_NUM_38
+#define RG_GPIO_I2C_SDA     GPIO_NUM_39
+#define RG_GAMEPAD_I2C_MAP {\
+    {RG_KEY_UP,     (1 << 0)},\
+    {RG_KEY_RIGHT,  (1 << 1)},\
+    {RG_KEY_DOWN,   (1 << 2)},\
+    {RG_KEY_LEFT,   (1 << 3)},\
+    {RG_KEY_A,      (1 << 4)},\
+    {RG_KEY_B,      (1 << 5)},\
+    {RG_KEY_X,      (1 << 6)},\
+    {RG_KEY_START,  (1 << 8)},\
+    {RG_KEY_MENU,   (1 << 9)},\
+}
 
 // Battery
 #define RG_BATTERY_DRIVER           0
