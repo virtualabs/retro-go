@@ -128,7 +128,7 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
 
 #if defined(RG_GAMEPAD_I2C_MAP)
     uint32_t buttons = 0;
-#if defined(RG_TARGET_QTPY_GAMER) || defined(RG_TARGET_BYTEBOI_REV1) || defined(TSINGTAO)
+#if defined(RG_TARGET_QTPY_GAMER) || defined(RG_TARGET_BYTEBOI_REV1) || defined(RG_TARGET_TSINGTAO)
     buttons = ~(rg_i2c_gpio_read_port(0) | rg_i2c_gpio_read_port(1) << 8);
 #else
     uint8_t data[5];
@@ -281,6 +281,7 @@ void rg_input_init(void)
     RG_LOGI("Initializing I2C gamepad driver...");
     rg_i2c_init();
 #if defined(RG_TARGET_QTPY_GAMER) || defined(RG_TARGET_BYTEBOI_REV1) || defined(RG_TARGET_TSINGTAO)
+    RG_LOGI("Configuring I2C GPIO ports ...");
     rg_i2c_gpio_init();
 #endif
     UPDATE_GLOBAL_MAP(keymap_i2c);

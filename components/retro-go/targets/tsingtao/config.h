@@ -43,6 +43,7 @@
 }
 #endif
 
+#if 1 /* TODO: debug I2C bus, especially pull-up resistors (10k instead of 4.7k !!!) */
 #define RG_I2C_DRIVER       2
 #define RG_GPIO_I2C_SCL     GPIO_NUM_38
 #define RG_GPIO_I2C_SDA     GPIO_NUM_39
@@ -53,10 +54,11 @@
     {RG_KEY_LEFT,   (1 << 3)},\
     {RG_KEY_A,      (1 << 4)},\
     {RG_KEY_B,      (1 << 5)},\
-    {RG_KEY_X,      (1 << 6)},\
+    {RG_KEY_SELECT, (1 << 6)},\
     {RG_KEY_START,  (1 << 8)},\
     {RG_KEY_MENU,   (1 << 9)},\
 }
+#endif
 
 // Battery
 #define RG_BATTERY_DRIVER           0
