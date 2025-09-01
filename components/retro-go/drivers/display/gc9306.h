@@ -788,17 +788,24 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
 
                 /* Send colors. */
                 //RG_LOGD("Sending pixels (%d bytes) ...", g_window.jitter.capacity);
-                g_window.jitter.pending = true;
+                //g_window.jitter.pending = true;
                 esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_window.jitter.buffer, g_window.jitter.capacity);
 
-                /* Update the number of pixels already sent. */
-                g_window.pixel_count += g_window.jitter.capacity/2;
-                jitter_left = g_window.jitter.size - g_window.jitter.capacity;
+                /* Wait for transaction callback to be called. */
+                if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+                {
+                    /* Update the number of pixels already sent. */
+                    g_window.pixel_count += g_window.jitter.capacity/2;
+                    jitter_left = g_window.jitter.size - g_window.jitter.capacity;
 
-                /* Update window y. */
-                g_window.y += g_window.nrows;
+                    /* Update window y. */
+                    g_window.y += g_window.nrows;
 
-                //RG_LOGD("Remaining bytes in jitter: %d", jitter_left);
+                    /* Flush our jitter. */
+                    jitter_flush(&g_window.jitter);
+
+                    xSemaphoreGive(g_lcd_sem);
+                }
             }
             else
             {
@@ -845,8 +852,17 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
                     //RG_LOGD("Sending pixels (%d bytes) ...", jitter_left);
                     esp_lcd_panel_io_tx_color(io_handle, 0x2C, jitter_last, jitter_left);
 
-                    /* Update the number of pixels already sent. */
-                    g_window.pixel_count += g_window.jitter.size/2;
+                    /* Wait for transaction callback to be called. */
+                    if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+                    {
+                        /* Update the number of pixels already sent. */
+                        g_window.pixel_count += g_window.jitter.size/2;
+
+                        /* Flush jitter. */
+                        jitter_flush(&g_window.jitter);
+
+                        xSemaphoreGive(g_lcd_sem);
+                    }
                 }
                 else
                 {
