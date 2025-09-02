@@ -105,6 +105,9 @@ static esp_err_t panel_gc9306_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_g
 static esp_err_t panel_gc9306_disp_on_off(esp_lcd_panel_t *panel, bool off);
 static esp_err_t panel_gc9306_sleep(esp_lcd_panel_t *panel, bool sleep);
 
+static void lcd_send_jitter(void);
+
+
 typedef struct {
     esp_lcd_panel_t base;
     esp_lcd_panel_io_handle_t io;
@@ -186,7 +189,7 @@ static rg_window_t g_window;
 
 /* Main framebuffer. */
 static uint16_t g_fb[LCD_BUFFER_LENGTH];
-
+static uint16_t g_lcd_trans[LCD_BUFFER_LENGTH];
 
 /***
  * Jitter implementation
@@ -256,10 +259,16 @@ bool jitter_flush(jitter_t *jitter)
         jitter->size -= jitter->capacity;
 
         /* Reset the pending state. */
+        /* TODO: remove pending if not used anymore. */
         jitter->pending = false;
 
         /* Success. */
         return true;
+    }
+    else
+    {
+        /* Not full, no extra data to handle. */
+        jitter->size = 0;
     }
 
     /* Not full. */
@@ -703,11 +712,26 @@ static void lcd_set_backlight(float percent)
     /* TODO */
 }
 
+static void lcd_sync(void)
+{
+    /* If some pixels left in our jitter, send to scren. */
+    if (g_window.jitter.size > 0)
+    {
+        //RG_LOGI("Jitter is not empty, flush to screen.");
+        lcd_send_jitter();
+    }
+
+    /* We are done with the current window, give back the display semaphore. */
+    xSemaphoreGive(g_disp_sem);
+}
+
 static void lcd_set_window(int left, int top, int width, int height)
 {
     /* We take our display semaphore to avoid retro-go setting a new window 
      * until we are done drawing the previous one.
      */
+    //RG_LOGI("Calling lcd_sync ...");
+    lcd_sync();
 
     //RG_LOGI("setting drawing window: x=%d, y=%d, w=%d, h=%d", left, top, width, height);
     if (xSemaphoreTake(g_disp_sem, portMAX_DELAY) == pdTRUE)
@@ -729,10 +753,10 @@ static void lcd_set_window(int left, int top, int width, int height)
         jitter_init(&g_window.jitter, g_window.nrows * width * 2);  
         //RG_LOGD("Jitter initialized with capacity=%d", g_window.jitter.capacity);
     }
-    else
-    {
-        RG_LOGE("Cannot take semaphore ownership for display");
-    }
+    //else
+    //{
+    //    RG_LOGE("Cannot take semaphore ownership for display");
+    //}
 }
 
 static inline uint16_t *lcd_get_buffer(size_t length)
@@ -740,33 +764,69 @@ static inline uint16_t *lcd_get_buffer(size_t length)
     return g_fb;
 }
 
-static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
+/**
+ * Send jitter to LCD and flush.
+ **/
+
+static void lcd_send_jitter(void)
 {
-    int jitter_left = 0;
-    uint16_t *jitter_last;
     int x = g_window.x;
     int xmax = g_window.xend;
     int y = g_window.y;
     int yend;
+    int lcd_data_size = RG_MIN(g_window.jitter.size, g_window.jitter.capacity);
+
+    /* Send jitter to screen. */
+    if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+    {
+#if 0
+        RG_LOGI(
+            "Sending %d bytes (%d pixels) to current window (x:%d, y:%d, w:%d, h:%d)",
+            lcd_data_size, lcd_data_size/2,
+            g_window.x, g_window.y, g_window.width, g_window.height
+        );
+#endif
+        /* Compute the end row for our update window. */
+        yend = RG_MIN(g_window.y + g_window.nrows - 1, g_window.yend);
+
+        /* Set drawing window (CASEL/PASEL). */
+        esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
+        esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
+
+        /* Send pixel data. */
+        //RG_LOGD("Sending pixels (%d bytes) ...", g_window.jitter.capacity);
+        memcpy(g_lcd_trans, g_window.jitter.buffer, lcd_data_size);
+        esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_lcd_trans, lcd_data_size);
+
+        /* Wait for transaction callback to be called. */
+        //if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
+        {
+            /* Update the number of pixels already sent. */
+            g_window.pixel_count += lcd_data_size/2;
+
+            /* Update window y. */
+            g_window.y += lcd_data_size/(g_window.width*2);
+
+            /* Flush our jitter. */
+            jitter_flush(&g_window.jitter);
+
+            //xSemaphoreGive(g_lcd_sem);
+        }
+    }
+    else
+    {
+        RG_LOGW("Could not take mutex ownership :(");
+    }
+}
+
+static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
+{
+    int jitter_left = 0;
 
     /* If length == 0, just exit as we don't have to process this buffer. */
     if (length == 0)
     {
-        xSemaphoreGive(g_disp_sem);
         return;
-    }
-
-    //RG_LOGD("sending %d pixels (%d bytes) to current window", length, length*2);
-
-    /* Should we flush our jitter ? */
-    if (g_window.jitter.pending)
-    {
-        //RG_LOGD("Jitter needs to be flushed, current size: %d", g_window.jitter.size);
-        if (!jitter_flush(&g_window.jitter))
-        {
-            RG_LOGE("Could not flush jitter.");
-        }
-        //RG_LOGD("Jitter size after flush: %d", g_window.jitter.size);
     }
 
     /* Add pixel data to our jitter. */
@@ -776,45 +836,11 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
         /* Is our jitter full ? (ready to be sent) */
         if (jitter_full(&g_window.jitter))
         {
-            //RG_LOGD("Jitter is full, sending data to screen.");
-
-            /* Send jitter to screen. */
-            if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-            {
-                yend = RG_MIN(g_window.y + g_window.nrows - 1, g_window.yend);
-
-                esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
-                esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
-
-                /* Send colors. */
-                //RG_LOGD("Sending pixels (%d bytes) ...", g_window.jitter.capacity);
-                //g_window.jitter.pending = true;
-                esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_window.jitter.buffer, g_window.jitter.capacity);
-
-                /* Wait for transaction callback to be called. */
-                if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-                {
-                    /* Update the number of pixels already sent. */
-                    g_window.pixel_count += g_window.jitter.capacity/2;
-                    jitter_left = g_window.jitter.size - g_window.jitter.capacity;
-
-                    /* Update window y. */
-                    g_window.y += g_window.nrows;
-
-                    /* Flush our jitter. */
-                    jitter_flush(&g_window.jitter);
-
-                    xSemaphoreGive(g_lcd_sem);
-                }
-            }
-            else
-            {
-                RG_LOGW("Could not take mutex ownership :(");
-            }
+            lcd_send_jitter();
         }
         else
         {
-            //RG_LOGD("jitter not full, current size: %d bytes", g_window.jitter.size);
+            //RG_LOGD("jitter not full, current size: %d/%d bytes", g_window.jitter.size, g_window.pixel_total*2);
             jitter_left = g_window.jitter.size;
         }
 
@@ -829,45 +855,7 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
             /* Send remaining pixels to screen, if any. */
             if (jitter_left > 0) 
             {
-                /* Flush jitter if needed. */
-                if (g_window.jitter.pending)
-                {
-                    //RG_LOGD("Jitter needs flushing: %d / %d bytes", g_window.jitter.size, g_window.jitter.capacity); 
-                    //jitter_flush(&g_window.jitter);
-                    //RG_LOGD("Jitter has been flushed.");
-                    jitter_last = &g_window.jitter.buffer[g_window.jitter.size];
-                } else {
-                    jitter_last = g_window.jitter.buffer;
-                }
-
-                /* Send jitter to screen. */
-                if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-                {
-                    yend = g_window.yend;
-
-                    esp_lcd_panel_io_tx_param(io_handle, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
-                    esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
-
-                    /* Send colors. */
-                    //RG_LOGD("Sending pixels (%d bytes) ...", jitter_left);
-                    esp_lcd_panel_io_tx_color(io_handle, 0x2C, jitter_last, jitter_left);
-
-                    /* Wait for transaction callback to be called. */
-                    if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-                    {
-                        /* Update the number of pixels already sent. */
-                        g_window.pixel_count += g_window.jitter.size/2;
-
-                        /* Flush jitter. */
-                        jitter_flush(&g_window.jitter);
-
-                        xSemaphoreGive(g_lcd_sem);
-                    }
-                }
-                else
-                {
-                    RG_LOGW("Could not take mutex ownership :(");
-                }
+                lcd_send_jitter();
             }
 
             /* We are done with the current window, give back the display semaphore. */
@@ -886,11 +874,6 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
 
 }
 
-static void lcd_sync(void)
-{
-    /* We are done with the current window, give back the display semaphore. */
-    xSemaphoreGive(g_disp_sem);
-}
 
 /**
  * Initialize our GC9306 I80 LCD controller.
