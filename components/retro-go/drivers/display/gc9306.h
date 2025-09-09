@@ -15,64 +15,23 @@
 #include "esp_dma_utils.h"
 #include "esp_check.h"
 
-//#include "rick.h"
-
 #define gc9306_CMD_RAMCTRL               0xb0
 #define gc9306_DATA_LITTLE_ENDIAN_BIT    (1 << 3)
 
-///
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#if CONFIG_EXAMPLE_LCD_I80_COLOR_IN_PSRAM
-// PCLK frequency can't go too high as the limitation of PSRAM bandwidth
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (2 * 1000 * 1000)
-#else
-//#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (10 * 1000 * 1000)
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (10 * 1000 * 1000)
-#endif // CONFIG_EXAMPLE_LCD_I80_COLOR_IN_PSRAM
+#define RG_SCREEN_CLOCK_HZ     (20 * 1000 * 1000)
 
-#define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
-#define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_DATA0          12
-#define EXAMPLE_PIN_NUM_DATA1          13
-#define EXAMPLE_PIN_NUM_DATA2          14
-#define EXAMPLE_PIN_NUM_DATA3          15
-#define EXAMPLE_PIN_NUM_DATA4          16
-#define EXAMPLE_PIN_NUM_DATA5          21
-#define EXAMPLE_PIN_NUM_DATA6          5
-#define EXAMPLE_PIN_NUM_DATA7          4
-#define EXAMPLE_PIN_NUM_DATA8          17
-#define EXAMPLE_PIN_NUM_DATA9          18
-#define EXAMPLE_PIN_NUM_DATA10         10
-#define EXAMPLE_PIN_NUM_DATA11         11
-#define EXAMPLE_PIN_NUM_DATA12         19
-#define EXAMPLE_PIN_NUM_DATA13         20
-#define EXAMPLE_PIN_NUM_DATA14         2
-#define EXAMPLE_PIN_NUM_DATA15         1
-#define EXAMPLE_PIN_NUM_PCLK           7
-#define EXAMPLE_PIN_NUM_CS             9
-#define EXAMPLE_PIN_NUM_DC             8
-#define EXAMPLE_PIN_NUM_RST            6
-#define EXAMPLE_PIN_NUM_BK_LIGHT       0
-
-// The pixel number in horizontal and vertical
-#define EXAMPLE_LCD_H_RES              RG_SCREEN_WIDTH
-#define EXAMPLE_LCD_V_RES              RG_SCREEN_HEIGHT
 // Bit number used to represent command and parameter
-#define EXAMPLE_LCD_CMD_BITS           8
-#define EXAMPLE_LCD_PARAM_BITS         8
-
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-#define EXAMPLE_I2C_NUM                 0   // I2C number
-#define EXAMPLE_I2C_SCL                 39
-#define EXAMPLE_I2C_SDA                 40
-#endif
+#define RG_SCREEN_CMD_BITS           8
+#define RG_SCREEN_PARAM_BITS         8
 
 /* 320 rows / 4 rows = 80 "slices" */
 #define LCD_FB_NB_ROWS              (4)
 #define LCD_FB_SIZE_BYTES           (RG_SCREEN_WIDTH*LCD_FB_NB_ROWS*2)
-#define LCD_RB_MAX (LCD_FB_MAX+1)
+
+
+/****************************
+ * GC9306 Panel control
+ ***************************/
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,10 +48,7 @@ typedef struct {
 }
 #endif
 
-static esp_lcd_panel_io_handle_t io_handle = NULL;
-
-static const char *TAG = "lcd_panel.gc9306";
-
+/* Exposed functions. */
 static esp_err_t panel_gc9306_del(esp_lcd_panel_t *panel);
 static esp_err_t panel_gc9306_reset(esp_lcd_panel_t *panel);
 static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel);
@@ -105,9 +61,7 @@ static esp_err_t panel_gc9306_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_g
 static esp_err_t panel_gc9306_disp_on_off(esp_lcd_panel_t *panel, bool off);
 static esp_err_t panel_gc9306_sleep(esp_lcd_panel_t *panel, bool sleep);
 
-static void lcd_send_jitter(void);
-
-
+/* Panel custom structure. */
 typedef struct {
     esp_lcd_panel_t base;
     esp_lcd_panel_io_handle_t io;
@@ -146,6 +100,25 @@ gc9306_init_cmd_t g_init_cmds[] = {
     {0x00, {0}, 0}
 };
 
+
+/****************************
+ * LCD panel jitter.
+ *
+ * This jitter is used during serial/parallel
+ * conversion due to the original display control
+ * implemented in RetroGo (designed to drive an
+ * SPI-based LCD screen instead of our I8080-based
+ * screen).
+ *
+ * The jitter stores incoming pixel data and rebuild
+ * the current subframes based on serial data sent
+ * by RetroGo. This way, we can keep the drawing
+ * window consistent and avoid sending raw data
+ * without specifying the window, unlike SPI-based
+ * screens. 
+ ***************************/
+
+
 typedef struct {
     /* Jitter capacity. */
     int capacity;
@@ -183,6 +156,20 @@ typedef struct {
     bool b_last;
 } rg_window_t;
 
+/* Exposed functions. */
+void jitter_init(jitter_t *jitter, int capacity);
+
+/**
+ * Globals
+ **/
+
+/* Debug tag. */
+static const char *TAG = "lcd_panel.gc9306";
+
+/* LCD panel handle. */
+static esp_lcd_panel_io_handle_t io_handle = NULL;
+
+/* SPI screen to I8080 adapter */
 static SemaphoreHandle_t g_lcd_sem = NULL;
 static SemaphoreHandle_t g_disp_sem = NULL;
 static rg_window_t g_window;
@@ -191,8 +178,13 @@ static rg_window_t g_window;
 static uint16_t g_fb[LCD_BUFFER_LENGTH];
 static uint16_t g_lcd_trans[LCD_BUFFER_LENGTH];
 
-/***
- * Jitter implementation
+
+/****************************
+ * Jitter implementation.
+ ***************************/
+
+/**
+ * Initialize a jitter with the given capacity.
  **/
 
 void jitter_init(jitter_t *jitter, int capacity)
@@ -206,10 +198,15 @@ void jitter_init(jitter_t *jitter, int capacity)
 }
 
 
+/**
+ * Append data to a given jitter.
+ *
+ * `buffer` points to the pixel data to add to the jitter,
+ * `size` specifies the data size in bytes.
+ **/
+
 bool jitter_add(jitter_t *jitter, uint16_t *buffer, int size)
 {
-    //RG_LOGD("   adding %d data bytes to jitter ...", size);
-
     /* Do we have enough space to save our data ? */
     if ((jitter->size + size) > (jitter->capacity*2))
     {
@@ -218,29 +215,42 @@ bool jitter_add(jitter_t *jitter, uint16_t *buffer, int size)
     }
     else
     {
-        //RG_LOGD("  jitter size before adding data: %d bytes", jitter->size);
-
         /* Append data to jitter's buffer. */
         for (int j=0; j<size/2; j++)
         {
             jitter->buffer[jitter->size/2+j] = (buffer[j]>>8) | ((buffer[j]&0x00ff)<<8);
         }
-        //memcpy(&jitter->buffer[jitter->size], buffer, size);
 
         /* Increase jitter size by 'size' bytes. */
         jitter->size += size;
-
-        //RG_LOGD("  jitter size after data added: %d bytes", jitter->size);
 
         /* Success. */
         return true;
     }
 }
 
+
+/**
+ * Determine if a given jitter is full.
+ *
+ * A jitter is considered 'full' when the size of data
+ * it contains is equal to or exceed its capacity. That
+ * usually means it should be empty into the screen buffer.
+ **/
+
 bool jitter_full(jitter_t *jitter)
 {
     return (jitter->size >= jitter->capacity);
 }
+
+
+/**
+ * Flush a given jitter.
+ *
+ * Current data is removed from the jitter. If the current data size exceeds
+ * the jitter capacity, only the current `capacity` bytes of data is flushed
+ * and the remaining data is moved in the jitter's buffer.
+ **/
 
 bool jitter_flush(jitter_t *jitter)
 {
@@ -276,8 +286,12 @@ bool jitter_flush(jitter_t *jitter)
 }
 
 
-/***
- * GC9306 Panel driver
+/****************************
+ * GC9306 Panel control impl.
+ ***************************/
+
+/**
+ * Initialize a new GC9306 panel control structure.
  **/
 
 esp_err_t
@@ -348,8 +362,6 @@ esp_lcd_new_panel_gc9306(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel
     gc9306->base.disp_on_off = panel_gc9306_disp_on_off;
     gc9306->base.disp_sleep = panel_gc9306_sleep;
     *ret_panel = &(gc9306->base);
-    RG_LOGD("new gc9306 panel @%p", gc9306);
-
     return ESP_OK;
 
 err:
@@ -363,6 +375,11 @@ err:
     return ret;
 }
 
+
+/**
+ * Deinit a previously allocated GC9306 panel control structure.
+ **/
+
 static esp_err_t panel_gc9306_del(esp_lcd_panel_t *panel)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
@@ -370,35 +387,42 @@ static esp_err_t panel_gc9306_del(esp_lcd_panel_t *panel)
     if (gc9306->reset_gpio_num >= 0) {
         gpio_reset_pin(gc9306->reset_gpio_num);
     }
-    RG_LOGD("del gc9306 panel @%p", gc9306);
     free(gc9306);
     return ESP_OK;
 }
+
+
+/**
+ * Reset the GC9306 controller.
+ **/
 
 static esp_err_t panel_gc9306_reset(esp_lcd_panel_t *panel)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9306->io;
 
-    RG_LOGD("reset gc9306 panel");
-
     // perform hardware reset
     if (gc9306->reset_gpio_num >= 0) {
         gpio_set_level(gc9306->reset_gpio_num, gc9306->reset_level);
-        //vTaskDelay(pdMS_TO_TICKS(10));
         rg_usleep(10 * 1000);
         gpio_set_level(gc9306->reset_gpio_num, !gc9306->reset_level);
-        //vTaskDelay(pdMS_TO_TICKS(10));
         rg_usleep(10 * 1000);
     } else { // perform software reset
         ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_SWRESET, NULL, 0), TAG,
                             "io tx param failed");
-        //vTaskDelay(pdMS_TO_TICKS(20)); // spec, wait at least 5m before sending new command
         rg_usleep(20 * 1000);
     }
 
     return ESP_OK;
 }
+
+
+/**
+ * Initialize the GC9306 controller.
+ *
+ * This function loops on `g_init_cmds` to configure the LCD panel
+ * with the correct orientation and pixel format.
+ **/
 
 static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel)
 {
@@ -406,13 +430,10 @@ static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel)
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9306->io;
 
-    //RG_LOGI("init gc9306 panel ...");
-
     /* GC9306 init commands */
     while (g_init_cmds[i].cmd != 0)
     {
         ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, g_init_cmds[i].cmd, g_init_cmds[i].params, g_init_cmds[i].nb_params), TAG, "io tx param failed");
-        //vTaskDelay(pdMS_TO_TICKS(10));
         rg_usleep(10 * 1000);
         
         i++;
@@ -421,11 +442,15 @@ static esp_err_t panel_gc9306_init(esp_lcd_panel_t *panel)
     // LCD goes into sleep mode and display will be turned off after power on reset, exit sleep mode first
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_SLPOUT, NULL, 0), TAG,
                         "io tx param failed");
-    //vTaskDelay(pdMS_TO_TICKS(100));
     rg_usleep(100 * 1000);
 
     return ESP_OK;
 }
+
+
+/**
+ * Draw a bitmap on screen.
+ **/
 
 static esp_err_t panel_gc9306_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end,
                                           const void *color_data)
@@ -459,6 +484,10 @@ static esp_err_t panel_gc9306_draw_bitmap(esp_lcd_panel_t *panel, int x_start, i
     return ESP_OK;
 }
 
+/**
+ * Invert colors on LCD panel.
+ **/
+
 static esp_err_t panel_gc9306_invert_color(esp_lcd_panel_t *panel, bool invert_color_data)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
@@ -473,6 +502,12 @@ static esp_err_t panel_gc9306_invert_color(esp_lcd_panel_t *panel, bool invert_c
                         "io tx param failed");
     return ESP_OK;
 }
+
+/**
+ * Configure the LCD panel's MAD register.
+ *
+ * The MAD register controls the screen and window orientation. Should be used with care.
+ **/
 
 static esp_err_t panel_gc9306_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
@@ -494,6 +529,13 @@ static esp_err_t panel_gc9306_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool
     return ESP_OK;
 }
 
+
+/**
+ * Swap X/Y axis on the LCD screen.
+ *
+ * Be careful, drawing window is impacted by any axis swap.
+ **/
+
 static esp_err_t panel_gc9306_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
@@ -509,6 +551,13 @@ static esp_err_t panel_gc9306_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
     return ESP_OK;
 }
 
+
+/**
+ * Set the GC9306 controller X and Y gaps.
+ *
+ * Gaps allow to skip a number of pixels on LCD sides.
+ **/
+
 static esp_err_t panel_gc9306_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_gap)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
@@ -516,6 +565,15 @@ static esp_err_t panel_gc9306_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_g
     gc9306->y_gap = y_gap;
     return ESP_OK;
 }
+
+
+/**
+ * Enable/disable display.
+ *
+ * When enabled, the GC9306 controller is live and drives the TFT matrix. When
+ * disabled, the screen is no more updated but pixels stay.
+ * Backlight should be switched off to avoid artefacts.
+ **/
 
 static esp_err_t panel_gc9306_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
 {
@@ -534,6 +592,14 @@ static esp_err_t panel_gc9306_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
     return ESP_OK;
 }
 
+
+/**
+ * Put the GC9306 controller in sleep mode or wake it up.
+ *
+ * When in sleep mode, the GC9306 controller only reacts to
+ * wake up command.
+ **/
+
 static esp_err_t panel_gc9306_sleep(esp_lcd_panel_t *panel, bool sleep)
 {
     gc9306_panel_t *gc9306 = __containerof(panel, gc9306_panel_t, base);
@@ -546,17 +612,24 @@ static esp_err_t panel_gc9306_sleep(esp_lcd_panel_t *panel, bool sleep)
     }
     ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, command, NULL, 0), TAG,
                         "io tx param failed");
-    //vTaskDelay(pdMS_TO_TICKS(100));
     rg_usleep(100 * 1000);
 
     return ESP_OK;
 }
 
-/** I8080 interface with LVGL. **/
+/****************************
+ * RetroGo i8080 display impl.
+ ***************************/
 
-bool lcd_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+/**
+ * Callback function to handle a succesfull i8080 transaction (pixel data).
+ *
+ * It gives back a semaphore used by the display task to synchronize and 
+ * send the remaining pixel data.
+ **/
+
+bool IRAM_ATTR lcd_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    int fb;
     BaseType_t hptask_woken = pdFALSE;
       
     /* Release ownership of our LCD mutex. */
@@ -565,41 +638,49 @@ bool lcd_trans_done(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_d
     return hptask_woken;
 }
 
-void example_init_i80_bus(esp_lcd_panel_io_handle_t *io_handle, void *user_ctx)
+
+/**
+ * Initialize the ESP32 LCD i8080 bus.
+ *
+ * This function configures the i8080 interface clock, pins, the screen
+ * size, pixel data format and LCD commands and bits sizes.
+ **/
+
+void i80_bus_init(esp_lcd_panel_io_handle_t *io_handle, void *user_ctx)
 {
     RG_LOGD("Initialize Intel 8080 bus");
     esp_lcd_i80_bus_handle_t i80_bus = NULL;
     esp_lcd_i80_bus_config_t bus_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
-        .dc_gpio_num = EXAMPLE_PIN_NUM_DC,
-        .wr_gpio_num = EXAMPLE_PIN_NUM_PCLK,
+        .dc_gpio_num = RG_SCREEN_DC,
+        .wr_gpio_num = RG_SCREEN_PCLK,
         .data_gpio_nums = {
-            EXAMPLE_PIN_NUM_DATA0,
-            EXAMPLE_PIN_NUM_DATA1,
-            EXAMPLE_PIN_NUM_DATA2,
-            EXAMPLE_PIN_NUM_DATA3,
-            EXAMPLE_PIN_NUM_DATA4,
-            EXAMPLE_PIN_NUM_DATA5,
-            EXAMPLE_PIN_NUM_DATA6,
-            EXAMPLE_PIN_NUM_DATA7,
-            EXAMPLE_PIN_NUM_DATA8,
-            EXAMPLE_PIN_NUM_DATA9,
-            EXAMPLE_PIN_NUM_DATA10,
-            EXAMPLE_PIN_NUM_DATA11,
-            EXAMPLE_PIN_NUM_DATA12,
-            EXAMPLE_PIN_NUM_DATA13,
-            EXAMPLE_PIN_NUM_DATA14,
-            EXAMPLE_PIN_NUM_DATA15,
+            RG_SCREEN_DATA0,
+            RG_SCREEN_DATA1,
+            RG_SCREEN_DATA2,
+            RG_SCREEN_DATA3,
+            RG_SCREEN_DATA4,
+            RG_SCREEN_DATA5,
+            RG_SCREEN_DATA6,
+            RG_SCREEN_DATA7,
+            RG_SCREEN_DATA8,
+            RG_SCREEN_DATA9,
+            RG_SCREEN_DATA10,
+            RG_SCREEN_DATA11,
+            RG_SCREEN_DATA12,
+            RG_SCREEN_DATA13,
+            RG_SCREEN_DATA14,
+            RG_SCREEN_DATA15,
         },
         .bus_width = 16,
-        .max_transfer_bytes = EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * sizeof(uint16_t),
+        .max_transfer_bytes = RG_SCREEN_WIDTH * RG_SCREEN_HEIGHT * sizeof(uint16_t),
         .sram_trans_align = 4,
     };
     ESP_ERROR_CHECK(esp_lcd_new_i80_bus(&bus_config, &i80_bus));
 
     esp_lcd_panel_io_i80_config_t io_config = {
-        .cs_gpio_num = EXAMPLE_PIN_NUM_CS,
-        .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
+        .cs_gpio_num = RG_SCREEN_CS,
+        .pclk_hz = RG_SCREEN_CLOCK_HZ,
         .trans_queue_depth = 10,
         .dc_levels = {
             .dc_idle_level = 0,
@@ -612,84 +693,27 @@ void example_init_i80_bus(esp_lcd_panel_io_handle_t *io_handle, void *user_ctx)
         },
         .on_color_trans_done = lcd_trans_done,
         .user_ctx = NULL,
-        .lcd_cmd_bits = EXAMPLE_LCD_CMD_BITS,
-        .lcd_param_bits = EXAMPLE_LCD_PARAM_BITS,
+        .lcd_cmd_bits = RG_SCREEN_CMD_BITS,
+        .lcd_param_bits = RG_SCREEN_PARAM_BITS,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80_bus, &io_config, io_handle));
 }
 
-static void panel_fill(esp_lcd_panel_io_handle_t io, unsigned int x, unsigned int y, unsigned int w, unsigned int h, uint16_t color)
-{
-    int i;
-    uint32_t pixels_count;
-    unsigned int ymax = y+h-1;
-    unsigned int xmax = x+w-1;
-    unsigned int yend = -1;
-    int nrows = (LCD_FB_SIZE_BYTES / (w*2));
 
-    if (nrows > h)
-    {
-        nrows = h;
-    }
+/**
+ * Initialize our LCD panel (GC9306 with i8080 interface).
+ *
+ * This function configures the ESP32 LCD driver, and initialize
+ * the underlying GC9306 controller.
+ **/
 
-    while (nrows > 0)
-    {
-        //RG_LOGD("panel_fill(): preparing to send pixels from row %d to %d", y, y+nrows);
-
-        /* Compute last row index. */
-        yend = y + nrows - 1;
-        //RG_LOGD("yend=%d (y+nrows)", yend);
-
-        /* Fill framebuffer with our color. */
-        pixels_count = nrows*w;
-        for (i=0; i<pixels_count; i++)
-        {
-            g_fb[i] = color;
-        }
-
-        /* Send to LCD. */
-        //RG_LOGD("Send CASEL/PASEL to LCD driver: (%d,%d) - (%d,%d)", x,y, xmax,yend);
-
-        /* Send to LCD. */
-        if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-        {
-            esp_lcd_panel_io_tx_param(io, 0x2A, (uint8_t[]){(x>>8)&0xff, x&0xff, (xmax >> 8) & 0xff, xmax & 0xff}, 4);
-            esp_lcd_panel_io_tx_param(io, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
-
-            /* Send colors. */
-            //RG_LOGD("Sending pixels (%lu bytes) ...", pixels_count*2);
-            esp_lcd_panel_io_tx_color(io, 0x2C, g_fb , pixels_count*2);
-        }
-        else
-        {
-            RG_LOGW("Could not take mutex ownership :(");
-        }
-
-        
-        /* Process next slice. */
-        //RG_LOGD("moving y from %d to %d", y, y+nrows);
-        y += nrows;
-
-        /* Are we done ? */
-        if (y == (ymax+1))
-        {
-            break;
-        }
-        else if ((ymax - y) < nrows)
-        {
-            nrows = ymax-y+1;
-        }
-    }
-}
-
-void example_init_lcd_panel(esp_lcd_panel_io_handle_t io_handle, esp_lcd_panel_handle_t *panel)
+void lcd_panel_init(esp_lcd_panel_io_handle_t io_handle, esp_lcd_panel_handle_t *panel)
 {
     esp_lcd_panel_handle_t panel_handle = NULL;
 
     /* Install LCD driver */
-    RG_LOGD("Install LCD driver of GC9306");
     esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = EXAMPLE_PIN_NUM_RST,
+        .reset_gpio_num = RG_SCREEN_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
@@ -701,16 +725,36 @@ void example_init_lcd_panel(esp_lcd_panel_io_handle_t io_handle, esp_lcd_panel_h
     *panel = panel_handle;
 }
 
+
 /**
- * Display driver exposed functions
+ * RetroGo LCD display APIs.
  **/
 
+static void lcd_send_jitter(void);
 
+/**
+ * Configure the LCD screen backlight.
+ *
+ * Backlight level is given as a percentage, and usually
+ * we drive it through PWM. 
+ *
+ * TODO !
+ **/
 
 static void lcd_set_backlight(float percent)
 {
     /* TODO */
 }
+
+
+/**
+ * LCD vertical synchronization callback.
+ *
+ * This function is called when RetroGo is done refreshing the
+ * screen content. We use this callback to make sure we sent
+ * all the pixel data to the current window (if there is some
+ * data to be sent).
+ **/
 
 static void lcd_sync(void)
 {
@@ -725,18 +769,30 @@ static void lcd_sync(void)
     xSemaphoreGive(g_disp_sem);
 }
 
+
+/**
+ * Set the LCD drawing window.
+ *
+ * This function is called whenever RetroGo is about to draw on screen.
+ * The provided window (origin X and Y coordinates, window width and height)
+ * can be anything and RetroGo usually sets it wide enough and won't send
+ * as many pixels as expected based on the window size.
+ *
+ * More importantly, the i8080 interface requires the driver to reset the
+ * drawing window before sending new data. This is why we are using a jitter
+ * to store pending pixel data before sending it to screen once a stride
+ * complete. The jitter is then flushed and ready to receive new data.
+ **/
+
 static void lcd_set_window(int left, int top, int width, int height)
 {
     /* We take our display semaphore to avoid retro-go setting a new window 
      * until we are done drawing the previous one.
      */
-    //RG_LOGI("Calling lcd_sync ...");
     lcd_sync();
 
-    //RG_LOGI("setting drawing window: x=%d, y=%d, w=%d, h=%d", left, top, width, height);
     if (xSemaphoreTake(g_disp_sem, portMAX_DELAY) == pdTRUE)
     {
-        //RG_LOGI("disp sem OK");
         /* Save window in our structure. */
         g_window.x = left;
         g_window.y = top;
@@ -753,22 +809,45 @@ static void lcd_set_window(int left, int top, int width, int height)
         jitter_init(&g_window.jitter, g_window.nrows * width * 2);  
         //RG_LOGD("Jitter initialized with capacity=%d", g_window.jitter.capacity);
     }
-    //else
-    //{
-    //    RG_LOGE("Cannot take semaphore ownership for display");
-    //}
+    else
+    {
+        RG_LOGE("Cannot take semaphore ownership for display");
+    }
 }
+
+
+/**
+ * Return the current drawing buffer.
+ *
+ * This function always returns the same buffer, as RetroGo calls it
+ * before commiting the modified buffer by calling `lcd_send_buffer()`
+ * with the updated buffer as parameter, that we retrieve and push into
+ * our jitter. Once 'sent', the same buffer can be used by RetroGo
+ * to prepare another screen region and send it later.
+ **/
 
 static inline uint16_t *lcd_get_buffer(size_t length)
 {
     return g_fb;
 }
 
+
 /**
  * Send jitter to LCD and flush.
+ *
+ * Once fulled (or containing only remaining data to send), the jitter's buffer
+ * is sent to the screen regarding the current drawing window and stride. Once
+ * sent to the screen (pushed into the display task queue), the buffer is flushed
+ * and remaining data is moved into the current jitter's buffer.
+ *
+ * The screen update operation is asynchronous, except for the configuration of
+ * the current display window with `esp_lcd_panel_io_tx_param()` which is synchronous.
+ * Once pixel data successfully sent to the LCD panel, our `lcd_trans_done()` callback
+ * function is called and gives back our binary semaphore to allow further pixel data
+ * to be sent to the LCD panel.
  **/
 
-static void lcd_send_jitter(void)
+static void IRAM_ATTR lcd_send_jitter(void)
 {
     int x = g_window.x;
     int xmax = g_window.xend;
@@ -779,13 +858,6 @@ static void lcd_send_jitter(void)
     /* Send jitter to screen. */
     if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
     {
-#if 0
-        RG_LOGI(
-            "Sending %d bytes (%d pixels) to current window (x:%d, y:%d, w:%d, h:%d)",
-            lcd_data_size, lcd_data_size/2,
-            g_window.x, g_window.y, g_window.width, g_window.height
-        );
-#endif
         /* Compute the end row for our update window. */
         yend = RG_MIN(g_window.y + g_window.nrows - 1, g_window.yend);
 
@@ -794,30 +866,38 @@ static void lcd_send_jitter(void)
         esp_lcd_panel_io_tx_param(io_handle, 0x2B, (uint8_t[]){(y>>8)&0xff, y&0xff, (yend >> 8) & 0xff, yend & 0xff}, 4);
 
         /* Send pixel data. */
-        //RG_LOGD("Sending pixels (%d bytes) ...", g_window.jitter.capacity);
         memcpy(g_lcd_trans, g_window.jitter.buffer, lcd_data_size);
         esp_lcd_panel_io_tx_color(io_handle, 0x2C, g_lcd_trans, lcd_data_size);
 
-        /* Wait for transaction callback to be called. */
-        //if (xSemaphoreTake(g_lcd_sem, portMAX_DELAY) == pdTRUE)
-        {
-            /* Update the number of pixels already sent. */
-            g_window.pixel_count += lcd_data_size/2;
+        /* Update the number of pixels already sent. */
+        g_window.pixel_count += lcd_data_size/2;
 
-            /* Update window y. */
-            g_window.y += lcd_data_size/(g_window.width*2);
+        /* Update window y. */
+        g_window.y += lcd_data_size/(g_window.width*2);
 
-            /* Flush our jitter. */
-            jitter_flush(&g_window.jitter);
-
-            //xSemaphoreGive(g_lcd_sem);
-        }
+        /* Flush our jitter. */
+        jitter_flush(&g_window.jitter);
     }
     else
     {
         RG_LOGW("Could not take mutex ownership :(");
     }
 }
+
+
+/**
+ * Send a prepared buffer to screen.
+ *
+ * RetroGo calls this function to send pixel data to the selected drawing window.
+ * Pixel data may not be aligned with the current window width, which is not an
+ * issue when an SPI-based screen controller is used (like the ILI9341), but is
+ * really one in our case. We need to adapt the SPI LCD interface to a more
+ * restrictive i8080 interface that does not accept incomplete data.
+ *
+ * This function uses a jitter to store the incoming pixel data in a way it
+ * can keep the drawing window and the data aligned and send complete stride
+ * to the LCD screen in order to avoid graphical glitches or issues.
+ **/
 
 static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
 {
@@ -830,7 +910,6 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
     }
 
     /* Add pixel data to our jitter. */
-    //RG_LOGD("adding %d bytes to jitter", length*2);
     if (jitter_add(&g_window.jitter, buffer, length*2))
     {
         /* Is our jitter full ? (ready to be sent) */
@@ -840,18 +919,12 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
         }
         else
         {
-            //RG_LOGD("jitter not full, current size: %d/%d bytes", g_window.jitter.size, g_window.pixel_total*2);
             jitter_left = g_window.jitter.size;
         }
 
         /* Process data left in jitter. */
-        //RG_LOGD("Check if last jitter to be sent: pixels=%d total=%d jitter=%d", g_window.pixel_count, g_window.pixel_total, jitter_left/2);
         if ((g_window.pixel_count + jitter_left/2) == g_window.pixel_total)
         {
-            //RG_LOGD("Received %d pixels, %d pixels in jitter = %d pixels total (window full)",
-            //        g_window.pixel_count, jitter_left/2, g_window.pixel_total);
-
-
             /* Send remaining pixels to screen, if any. */
             if (jitter_left > 0) 
             {
@@ -861,11 +934,6 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
             /* We are done with the current window, give back the display semaphore. */
             xSemaphoreGive(g_disp_sem);
         }
-        else
-        {
-            //RG_LOGD("Received %d pixels so far, waiting more to reach %d pixels.", g_window.pixel_count, g_window.pixel_total);
-        }
-
     } 
     else
     {
@@ -877,12 +945,12 @@ static inline void lcd_send_buffer(uint16_t *buffer, size_t length)
 
 /**
  * Initialize our GC9306 I80 LCD controller.
+ *
+ * RetroGo calls this function to initialize the LCD driver, its interface and GPIOs.
  **/
 
 static void lcd_init()
 {
-    int fb;
-
     memset(g_fb, 0, LCD_FB_SIZE_BYTES);
 
     /* Create a binary semaphore to marshall I80 pixel write operations. */
@@ -901,29 +969,28 @@ static void lcd_init()
     }
     xSemaphoreGive(g_disp_sem);
 
-    RG_LOGI("initializing I8080 bus ...");
-    example_init_i80_bus(&io_handle, NULL);
+    i80_bus_init(&io_handle, NULL);
 
-    RG_LOGI("initializing LCD GC9306 panel ...");
     esp_lcd_panel_handle_t panel_handle = NULL;
-    example_init_lcd_panel(io_handle, &panel_handle);
+    lcd_panel_init(io_handle, &panel_handle);
 
-    RG_LOGI("enabling lcd ...");
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
     rg_usleep(100*1000);
 
     /* Clean panel. */
-    RG_LOGI("Cleaning panel ...");
     rg_display_clear(C_BLACK);
-    //rg_usleep(3000 * 1000);
     RG_LOGI("init done");
 }
 
+/**
+ * Deinitialize the LCD screen interface.
+ **/
+
 static void lcd_deinit(void)
 {
-    // TODO
 }
 
+/* RetroGo display driver info structure. */
 const rg_display_driver_t rg_display_driver_gc9306 = {
     .name = "gc9306",
 };

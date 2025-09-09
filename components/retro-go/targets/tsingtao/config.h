@@ -23,30 +23,32 @@
 #define RG_SCREEN_MARGIN_BOTTOM     0
 #define RG_SCREEN_MARGIN_LEFT       0
 #define RG_SCREEN_MARGIN_RIGHT      0
-// Input
-// Refer to rg_input.h to see all available RG_KEY_* and RG_GAMEPAD_*_MAP types
+#define RG_SCREEN_DATA0             GPIO_NUM_12
+#define RG_SCREEN_DATA1             GPIO_NUM_13
+#define RG_SCREEN_DATA2             GPIO_NUM_14
+#define RG_SCREEN_DATA3             GPIO_NUM_15
+#define RG_SCREEN_DATA4             GPIO_NUM_16
+#define RG_SCREEN_DATA5             GPIO_NUM_21
+#define RG_SCREEN_DATA6             GPIO_NUM_5
+#define RG_SCREEN_DATA7             GPIO_NUM_4
+#define RG_SCREEN_DATA8             GPIO_NUM_17
+#define RG_SCREEN_DATA9             GPIO_NUM_18
+#define RG_SCREEN_DATA10            GPIO_NUM_10
+#define RG_SCREEN_DATA11            GPIO_NUM_11
+#define RG_SCREEN_DATA12            GPIO_NUM_19
+#define RG_SCREEN_DATA13            GPIO_NUM_20
+#define RG_SCREEN_DATA14            GPIO_NUM_2
+#define RG_SCREEN_DATA15            GPIO_NUM_1
+#define RG_SCREEN_PCLK              GPIO_NUM_7
+#define RG_SCREEN_CS                GPIO_NUM_9
+#define RG_SCREEN_DC                GPIO_NUM_8
+#define RG_SCREEN_RST               GPIO_NUM_6
+#define RG_SCREEN_BK_LIGHT          GPIO_NUM_0
 
-#if 0
-#define RG_GAMEPAD_ADC_MAP {\
-    {RG_KEY_UP,    ADC_UNIT_1, ADC_CHANNEL_5, ADC_ATTEN_DB_11, 3072, 4096},\
-    {RG_KEY_RIGHT, ADC_UNIT_1, ADC_CHANNEL_6, ADC_ATTEN_DB_11, 1024, 3071},\
-    {RG_KEY_DOWN,  ADC_UNIT_1, ADC_CHANNEL_5, ADC_ATTEN_DB_11, 1024, 3071},\
-    {RG_KEY_LEFT,  ADC_UNIT_1, ADC_CHANNEL_6, ADC_ATTEN_DB_11, 3072, 4096},\
-}
-#define RG_GAMEPAD_GPIO_MAP {\
-    {RG_KEY_A, GPIO_NUM_41, GPIO_PULLUP_ONLY, 0},\
-    {RG_KEY_START,  GPIO_NUM_42, GPIO_PULLUP_ONLY, 0},\
-    {RG_KEY_MENU,   GPIO_NUM_18, GPIO_PULLUP_ONLY, 0},\
-    {RG_KEY_OPTION, GPIO_NUM_8,  GPIO_PULLUP_ONLY, 0},\
-    {RG_KEY_A,      GPIO_NUM_15, GPIO_PULLUP_ONLY, 0},\
-    {RG_KEY_B,      GPIO_NUM_5,  GPIO_PULLUP_ONLY, 0},\
-}
-#endif
-
-#if 1 /* TODO: debug I2C bus, especially pull-up resistors (10k instead of 4.7k !!!) */
-#define RG_I2C_DRIVER       2
-#define RG_GPIO_I2C_SCL     GPIO_NUM_38
-#define RG_GPIO_I2C_SDA     GPIO_NUM_39
+/* Gamepad (MCP23017) */
+#define RG_I2C_DRIVER               2
+#define RG_GPIO_I2C_SCL             GPIO_NUM_38
+#define RG_GPIO_I2C_SDA             GPIO_NUM_39
 #define RG_GAMEPAD_I2C_MAP {\
     {RG_KEY_UP,     (1 << 0)},\
     {RG_KEY_RIGHT,  (1 << 1)},\
@@ -58,7 +60,6 @@
     {RG_KEY_START,  (1 << 8)},\
     {RG_KEY_MENU,   (1 << 9)},\
 }
-#endif
 
 // Battery
 #define RG_BATTERY_DRIVER           0
