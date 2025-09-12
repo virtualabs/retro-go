@@ -10,6 +10,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_commands.h"
 #include "driver/gpio.h"
+#include <driver/ledc.h>
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_dma_utils.h"
@@ -743,7 +744,17 @@ static void lcd_send_jitter(void);
 
 static void lcd_set_backlight(float percent)
 {
-    /* TODO */
+    float level = RG_MIN(RG_MAX(percent / 100.f, 0), 1.f);
+    int error_code = 0;
+
+#if defined(RG_GPIO_LCD_BCKL)
+    error_code = ledc_set_fade_time_and_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0x1FFF * level, 50, 0);
+
+    if (error_code)
+        RG_LOGE("failed setting backlight to %d%% (0x%02X)\n", (int)(100 * level), error_code);
+    else
+        RG_LOGI("backlight set to %d%%\n", (int)(100 * level));
+#endif
 }
 
 
@@ -953,6 +964,24 @@ static void lcd_init()
 {
     memset(g_fb, 0, LCD_FB_SIZE_BYTES);
 
+#ifdef RG_GPIO_LCD_BCKL
+    // Initialize backlight at 0% to avoid the lcd reset flash
+    ledc_timer_config(&(ledc_timer_config_t){
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .freq_hz = 5000,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_num = LEDC_TIMER_0,
+    });
+    ledc_channel_config(&(ledc_channel_config_t){
+        .channel = LEDC_CHANNEL_0,
+        .duty = 0,
+        .gpio_num = RG_GPIO_LCD_BCKL,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_sel = LEDC_TIMER_0,
+    });
+    ledc_fade_func_install(0);
+#endif
+
     /* Create a binary semaphore to marshall I80 pixel write operations. */
     g_lcd_sem = xSemaphoreCreateBinary();
     if (g_lcd_sem == NULL)
@@ -980,6 +1009,7 @@ static void lcd_init()
     /* Clean panel. */
     rg_display_clear(C_BLACK);
     RG_LOGI("init done");
+    lcd_set_backlight(config.backlight);
 }
 
 /**
