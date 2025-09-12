@@ -3,19 +3,19 @@
 
 // Storage
 #define RG_STORAGE_ROOT             "/sd"
-// #define RG_STORAGE_SDSPI_HOST       SPI3_HOST
-// #define RG_STORAGE_SDSPI_SPEED      SDMMC_FREQ_DEFAULT
+#define RG_STORAGE_SDSPI_HOST       SPI3_HOST
+#define RG_STORAGE_SDSPI_SPEED      SDMMC_FREQ_DEFAULT
 // #define RG_STORAGE_SDMMC_HOST       SDMMC_HOST_SLOT_1
 // #define RG_STORAGE_SDMMC_SPEED      SDMMC_FREQ_DEFAULT
-#define RG_STORAGE_FLASH_PARTITION  "vfs"
+//#define RG_STORAGE_FLASH_PARTITION  "vfs"
 
 // Audio
 #define RG_AUDIO_USE_INT_DAC        0   // 0 = Disable, 1 = GPIO25, 2 = GPIO26, 3 = Both
-#define RG_AUDIO_USE_EXT_DAC        0   // 0 = Disable, 1 = Enable
+#define RG_AUDIO_USE_EXT_DAC        1   // 0 = Disable, 1 = Enable
 
 // Video
 #define RG_SCREEN_DRIVER            1   // 1 = GC9306
-#define RG_SCREEN_BACKLIGHT         0
+#define RG_SCREEN_BACKLIGHT         1
 #define RG_SCREEN_WIDTH             320
 #define RG_SCREEN_HEIGHT            240
 #define RG_SCREEN_ROTATE            0
@@ -43,7 +43,7 @@
 #define RG_SCREEN_CS                GPIO_NUM_9
 #define RG_SCREEN_DC                GPIO_NUM_8
 #define RG_SCREEN_RST               GPIO_NUM_6
-#define RG_SCREEN_BK_LIGHT          GPIO_NUM_0
+#define RG_GPIO_LCD_BCKL            GPIO_NUM_40
 
 /* Gamepad (MCP23017) */
 #define RG_I2C_DRIVER               2
@@ -67,13 +67,13 @@
 // Status LED
 // #define RG_GPIO_LED                 GPIO_NUM_38
 
-#define RG_GPIO_SDSPI_MISO          GPIO_NUM_9
-#define RG_GPIO_SDSPI_MOSI          GPIO_NUM_11
-#define RG_GPIO_SDSPI_CLK           GPIO_NUM_13
-#define RG_GPIO_SDSPI_CS            GPIO_NUM_10
+#define RG_GPIO_SDSPI_MISO          GPIO_NUM_35
+#define RG_GPIO_SDSPI_MOSI          GPIO_NUM_36
+#define RG_GPIO_SDSPI_CLK           GPIO_NUM_37
+#define RG_GPIO_SDSPI_CS            GPIO_NUM_41
 
 // External I2S DAC
-#define RG_GPIO_SND_I2S_BCK         41
-#define RG_GPIO_SND_I2S_WS          42
-#define RG_GPIO_SND_I2S_DATA        40
+#define RG_GPIO_SND_I2S_BCK         GPIO_NUM_47
+#define RG_GPIO_SND_I2S_WS          GPIO_NUM_45 /* Actually, we should not use GPIO 45, PCB v2 uses 48. */
+#define RG_GPIO_SND_I2S_DATA        GPIO_NUM_42
 // #define RG_GPIO_SND_AMP_ENABLE      18
