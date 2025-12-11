@@ -82,7 +82,7 @@ typedef struct {
 gc9306_init_cmd_t g_init_cmds[] = {
     {0xFE, {0}, 0},     /* Enable inner register 1. */
     {0xEF, {0}, 0},     /* Enable inner register 2. */
-    {0x36, {0xe8}, 1},  /* Set screen orientation (MV=1, MY=1, MX=1, ML=0, BGR=1) */
+    {0x36, {0x28}, 1},  /* Set screen orientation (MV=1, MY=1, MX=1, ML=0, BGR=1) */
     {0x3A, {0x05}, 1},  /* 16-bits per pixels on MCU interface. */
     {0xA4, {0x44}, 1},  /* Set VCore voltage to 1.7v */
     {0xA6, {0x2A}, 1},  /* Set VREG1A OUT voltage */
